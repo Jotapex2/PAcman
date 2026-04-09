@@ -649,6 +649,12 @@
                 this.input.bind();
                 this.sound.bindUnlock();
                 this.restartBtn.onclick = () => this.handleOverlayAction();
+                const startFromGesture = () => {
+                    if (!this.started && !this.gameOver) this.startGame();
+                };
+                window.addEventListener("pointerdown", startFromGesture, { passive: true });
+                window.addEventListener("touchstart", startFromGesture, { passive: true });
+                window.addEventListener("keydown", startFromGesture, { passive: true });
                 this.overlay.addEventListener("pointerdown", (e) => {
                     if (e.target === this.overlay || e.target === this.statusText || e.target === this.overlaySubtext) this.handleOverlayAction();
                 });
@@ -682,10 +688,14 @@
             }
             hideOverlay() { this.overlay.style.display = "none"; }
             handleOverlayAction() {
-                if (!this.started && !this.gameOver) this.startGame();
-                else this.init();
+                if (!this.started && !this.gameOver) {
+                    this.startGame();
+                    return;
+                }
+                if (this.gameOver) this.init();
             }
             startGame() {
+                if (this.started) return;
                 this.sound.unlock(true);
                 this.started = true;
                 this.lastTime = performance.now();
