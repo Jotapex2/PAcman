@@ -141,7 +141,7 @@
         const SCATTER_DURATION = 7;
         const CHASE_DURATION = 20;
         const STARTING_LIVES = 3;
-        const POWER_MODE_DURATION = 8; // Duración razonable
+        const POWER_MODE_DURATION = 20; // Aumentado para permitir el parpadeo de 10s
         const GHOST_EXIT_DELAY_FACTOR = 1 / 3;
         const FRUIT_SPAWN_INTERVAL = 20;
         const FRUIT_SCORE = 100;
@@ -237,19 +237,31 @@
                     this.masterGain.gain.value = 0.18;
                     this.masterGain.connect(this.audioContext.destination);
                 }
-                if (this.audioContext.state === "suspended") this.audioContext.resume().catch(() => {});
                 this.enabled = true;
-                if (playConfirm && !this.unlockedOnce) {
-                    this.unlockedOnce = true;
-                    this.playTone(660, 0.05, "square", 0.12, 0);
+                const playUnlockTone = () => {
+                    if (playConfirm && !this.unlockedOnce) {
+                        this.unlockedOnce = true;
+                        this.playTone(660, 0.05, "square", 0.12, 0);
+                    }
+                };
+                if (this.audioContext.state === "suspended") {
+                    this.audioContext.resume().then(playUnlockTone).catch(() => {});
+                    return;
                 }
+                playUnlockTone();
             }
             bindUnlock() {
                 /* Cualquier teclado, click o touch inicial habilita el motor de audio. */
                 const unlock = () => this.unlock(true);
+                const overlay = document.getElementById("overlay");
                 window.addEventListener("keydown", unlock, { passive: true, once: true });
                 window.addEventListener("pointerdown", unlock, { passive: true, once: true });
                 window.addEventListener("touchstart", unlock, { passive: true, once: true });
+                /* También desbloqueamos al hacer click en el overlay directamente */
+                if (overlay) {
+                    overlay.addEventListener("pointerdown", unlock, { passive: true, once: true });
+                    overlay.addEventListener("touchstart", unlock, { passive: true, once: true });
+                }
             }
             playTone(frequency, duration, type = "square", volume = 0.3, startAt = 0) {
                 /* Utilidad base: crea un oscilador corto con envolvente simple de ataque y caida, o sea, un pequeño sonido para el juego */
@@ -309,7 +321,7 @@
                 this.playTone(659, 0.06, "triangle", 0.16, 0.06);
                 this.playTone(784, 0.09, "triangle", 0.15, 0.12);
             }
-            updateSiren(isActive, deltaTime) {
+            updateSiren(isActive, deltaTime, isAngry = false) {
                 /* Sirena simple en loop mientras la partida sigue activa, es una emulación bastante primitiva del background_sound del pacman original */
                 if (!isActive || !this.enabled || !this.audioContext) {
                     this.sirenTimer = 0;
@@ -317,11 +329,28 @@
                     return;
                 }
                 this.sirenTimer += deltaTime;
-                if (this.sirenTimer < 0.32) return;
+                const interval = isAngry ? 0.18 : 0.32;
+                if (this.sirenTimer < interval) return;
                 this.sirenTimer = 0;
                 const freq = this.sirenStep % 2 === 0 ? 392 : 440;
                 this.sirenStep++;
-                this.playTone(freq, 0.22, "sawtooth", 0.045, 0);
+                this.playTone(freq, 0.16, "sawtooth", 0.06, 0);
+            }
+            updatePowerSound(isActive, deltaTime) {
+                /* Loop corto de dos notas para ScaredMode, inspirado en el frightened theme clásico */
+                if (!isActive || !this.enabled || !this.audioContext) {
+                    this.powerSoundTimer = 0;
+                    this.powerSoundStep = 0;
+                    return;
+                }
+                this.powerSoundTimer = (this.powerSoundTimer || 0) + deltaTime;
+                if (this.powerSoundTimer < 0.12) return;
+                this.powerSoundTimer = 0;
+                const step = this.powerSoundStep || 0;
+                const notes = [196, 147];
+                const freq = notes[step % notes.length];
+                this.powerSoundStep = step + 1;
+                this.playTone(freq, 0.09, "square", 0.09, 0);
             }
         }
    /* El laberinto: contiene el estado actual del mapa, pellets restantes y validaciones del grid */
@@ -406,7 +435,7 @@
             update(game, deltaTime) {
                 /* Mueve la entidad según su velocidad y el delta time */
                 const distance = this.speed * TILE_SIZE * deltaTime;
-                const prevX = this.x, prevY = this.y;fantasmas
+                const prevX = this.x, prevY = this.y;
                 
                 this.x += this.dir.x * distance; this.y += this.dir.y * distance;
                 game.board.wrapEntityPosition(this);
@@ -459,7 +488,14 @@
                     game.activatePowerMode();
                 }
             }
-            draw(ctx) {
+            draw(ctx, game) {
+                if (game && game.isDying) {
+                    /* Animación de muerte: Pac-Man se cierra sobre sí mismo */
+                    const progress = Math.min(1, game.deathTimer / 1.5);
+                    ctx.fillStyle = "#ffff00"; ctx.beginPath(); ctx.moveTo(this.x, this.y);
+                    ctx.arc(this.x, this.y, this.radius + 1, (this.dir.angle + Math.PI * progress), (this.dir.angle + 2 * Math.PI - Math.PI * progress)); ctx.fill();
+                    return;
+                }
                 ctx.fillStyle = "#ffff00"; ctx.beginPath(); ctx.moveTo(this.x, this.y);
                 ctx.arc(this.x, this.y, this.radius + 1, this.dir.angle + this.mouthOpen * Math.PI, this.dir.angle + (2 - this.mouthOpen) * Math.PI); ctx.fill();
             }
@@ -602,20 +638,32 @@
                 else if (this.mode instanceof ChaseMode && this.modeTimer >= CHASE_DURATION) { this.mode = new ScatterMode(); this.modeTimer = 0; }
                 this.speed = this.mode.getSpeed(this);
             }
-            draw(ctx) {
+            draw(ctx, game) {
                 /* En modo eaten solo se dibujan los ojos para simular al fantasma regresando, esto mediante canvas */
                 if (this.mode instanceof EatenMode) { this.drawEyes(ctx); return; }
                 
                 const scared = this.mode instanceof ScaredMode;
-                ctx.fillStyle = scared ? "#2d6bff" : this.color; ctx.beginPath();
+                let color = this.color;
+                
+                if (scared) {
+                    /* Si quedan menos de 4 segundos, parpadea entre azul y blanco */
+                    if (game && game.powerModeTimeLeft < 4 && Math.floor(game.powerModeTimeLeft * 4) % 2 === 0) {
+                        color = "#ffffff";
+                    } else {
+                        color = "#2d6bff";
+                    }
+                }
+                
+                ctx.fillStyle = color; ctx.beginPath();
                 ctx.arc(this.x, this.y, this.radius + 1, Math.PI, 0);
                 ctx.lineTo(this.x + this.radius + 1, this.y + this.radius + 1);
                 ctx.lineTo(this.x - this.radius - 1, this.y + this.radius + 1); ctx.fill();
 
                 if (scared) {
-                    /* Sprite simple del fantasma asustado */
-                    ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(this.x-4, this.y-2, 3, 0, Math.PI); ctx.arc(this.x+4, this.y-2, 3, 0, Math.PI); ctx.stroke();
-                    ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(this.x-4, this.y+4, 1.2, 0, 7); ctx.arc(this.x, this.y+5, 1.2, 0, 7); ctx.arc(this.x+4, this.y+4, 1.2, 0, 7); ctx.fill();
+                    /* Sprite simple del fantasma asustado (boca y ojos) */
+                    const isWhite = color === "#ffffff";
+                    ctx.strokeStyle = isWhite ? "#ff0000" : "white"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(this.x-4, this.y-2, 3, 0, Math.PI); ctx.arc(this.x+4, this.y-2, 3, 0, Math.PI); ctx.stroke();
+                    ctx.fillStyle = isWhite ? "#ff0000" : "white"; ctx.beginPath(); ctx.arc(this.x-4, this.y+4, 1.2, 0, 7); ctx.arc(this.x, this.y+5, 1.2, 0, 7); ctx.arc(this.x+4, this.y+4, 1.2, 0, 7); ctx.fill();
                     return;
                 }
                 this.drawEyes(ctx);
@@ -628,8 +676,17 @@
         }
    /* Clases de los cuatro fantasmas, tienen los mismos nombres que los originales. Como curiosidad, este conserva el bug del Pinky original, cuando  Pac-Man mira hacia arriba, el objetivo de Pinky serán 2 Pac-Dots delante y 2 a la izquierda de Pac-Man */
 
-        class Blinky extends Ghost { constructor(x, y) { super(x, y, "red", { col: 17, row: 1 }); } getChaseTarget(game) { return game.player.getGridPos(); } }
-        class Pinky extends Ghost { constructor(x, y) { super(x, y, "#ffb8ff", { col: 1, row: 1 }); } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir; return { col: p.col + d.x*4 - (d===DIRECTIONS.UP?4:0), row: p.row + d.y*4 }; } }
+        class Blinky extends Ghost {
+            constructor(x, y) { super(x, y, "red", { col: 17, row: 1 }); }
+            getChaseTarget(game) { return game.player.getGridPos(); }
+            updateMode(game, deltaTime) {
+                /* Blinky se vuelve "Angry" cuando quedan pocos pellets, aumentando su velocidad base */
+                const isAngry = game.board.pelletsLeft <= BLINKY_ANGRY_THRESHOLD;
+                this.baseSpeed = isAngry ? BLINKY_ANGRY_SPEED : GHOST_SPEED;
+                if (isAngry) game.isAngry = true;
+                super.updateMode(game, deltaTime);
+            }
+        }        class Pinky extends Ghost { constructor(x, y) { super(x, y, "#ffb8ff", { col: 1, row: 1 }); } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir; return { col: p.col + d.x*4 - (d===DIRECTIONS.UP?4:0), row: p.row + d.y*4 }; } }
         class Inky extends Ghost { constructor(x, y, b) { super(x, y, "#00ffff", { col: 17, row: 19 }); this.b = b; } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir, pt = {col: p.col + d.x*2, row: p.row + d.y*2}, bp = this.b.getGridPos(); return { col: bp.col + (pt.col - bp.col)*2, row: bp.row + (pt.row - bp.row)*2 }; } }
         class Clyde extends Ghost { constructor(x, y) { super(x, y, "#ffb852", { col: 1, row: 19 }); } getChaseTarget(game) { const p = game.player.getGridPos(), c = this.getGridPos(); return Math.hypot(p.col-c.col, p.row-c.row) > 8 ? p : this.scatterTarget; } }
    /* Clase Game engine, controla el loop del juego y el estado global de la partida */
@@ -645,6 +702,9 @@
                 this.canvas.width = GRID_WIDTH * TILE_SIZE; this.canvas.height = GRID_HEIGHT * TILE_SIZE;
                 this.board = new Board(INITIAL_MAP); this.input = new InputController(); this.sound = new SoundManager();
                 this.lastTime = 0;
+                this.isDying = false;
+                this.deathTimer = 0;
+                this.isAngry = false;
                 this.init();
                 this.input.bind();
                 this.sound.bindUnlock();
@@ -668,6 +728,7 @@
             init() {
                 /* Reinicia score, vidas, power mode, tablero y entidades */
                 this.board.reset(); this.score = 0; this.lives = STARTING_LIVES; this.powerModeTimeLeft = 0; this.gameOver = false; this.started = false;
+                this.isDying = false; this.deathTimer = 0; this.isAngry = false;
                 this.fruit = {
                     col: this.board.fruitStart ? this.board.fruitStart.col : GHOST_HOUSE.centerCol,
                     row: this.board.fruitStart ? this.board.fruitStart.row : GHOST_HOUSE.innerRow + 2,
@@ -721,7 +782,23 @@
             syncHud() { document.getElementById("score").innerText = this.score; document.getElementById("pellets").innerText = this.board.pelletsLeft; document.getElementById("lives").innerText = this.lives; }
             update(dt) {
                 if (this.gameOver || !this.started) return;
-                this.sound.updateSiren(true, dt);
+                
+                if (this.isDying) {
+                    this.deathTimer += dt;
+                    if (this.deathTimer >= 1.6) {
+                        this.isDying = false;
+                        this.lives--;
+                        if (this.lives === 0) {
+                            this.gameOver = true;
+                            this.showOverlay("GAME OVER", "Toca para reiniciar", "#ff0000", "REINICIAR");
+                        } else {
+                            this.resetRoundPositions();
+                        }
+                    }
+                    return;
+                }
+
+                this.isAngry = false;
                 /* Cuenta regresiva del power mode */
                 if (this.powerModeTimeLeft > 0) this.powerModeTimeLeft = Math.max(0, this.powerModeTimeLeft - dt);
                 if (!this.fruit.visible) {
@@ -757,21 +834,30 @@
                         }
                         else {
                             /* Si no está scared, Pac-Man pierde una vida. Acá solo resetea las posiciones, no hay animación de muerte */
-                            this.lives--;
+                            this.isDying = true;
+                            this.deathTimer = 0;
                             this.sound.playDeath();
-                           /* Y si pierdes todas las vidas, se acaba el juego*/
-
-                            if (this.lives === 0) { this.gameOver = true; this.showOverlay("GAME OVER", "Toca para reiniciar", "#ff0000", "REINICIAR"); }
-                            else { this.resetRoundPositions(); }
                             break;
                         }
                     }
                 }
                 if (this.board.pelletsLeft === 0) { this.gameOver = true; this.showOverlay("VICTORIA", "Toca para jugar otra vez", "#00ff00", "REINICIAR"); }
+                
+                if (this.powerModeTimeLeft > 0) {
+                    this.sound.updateSiren(false, dt);
+                    this.sound.updatePowerSound(true, dt);
+                } else {
+                    this.sound.updateSiren(true, dt, this.isAngry);
+                    this.sound.updatePowerSound(false, dt);
+                }
+                
                 this.syncHud();
             }
             /* Activa la invencibilidad temporal tras comer un super pellet */
-            activatePowerMode() { this.powerModeTimeLeft = POWER_MODE_DURATION; }
+            activatePowerMode() {
+                this.powerModeTimeLeft = POWER_MODE_DURATION;
+                this.ghosts.forEach(g => g.ignorePowerModeUntilExit = false);
+            }
             drawFruit() {
                 if (!this.fruit.visible) return;
                 const x = this.fruit.col * TILE_SIZE + TILE_SIZE / 2;
@@ -796,7 +882,7 @@
                 this.ctx.fillRect(0,0,this.canvas.width,this.canvas.height);
                 this.board.draw(this.ctx);
                 this.drawFruit();
-                this.entities.forEach(e => e.draw(this.ctx));
+                this.entities.forEach(e => e.draw(this.ctx, this));
             }
             /* Loop principal del juego con delta time limitado para evitar saltos bruscos */
             run(ts) { const dt = Math.min((ts - this.lastTime) / 1000 || 0, 0.05); this.lastTime = ts; this.update(dt); this.draw(); requestAnimationFrame(t => this.run(t)); }
