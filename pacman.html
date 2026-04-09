@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pac-Man Senior Edition - Pro Fixes</title>
+    <style>
+        :root {
+              /* El color del bg, panel, los muros del laberinto, pacman, el pelet y el texto */
+            --bg-color: #000;
+            --panel-color: #0d1020;
+            --maze-color: #2424ff;
+            --pacman-color: #ffff00;
+            --pellet-color: #ffb8ae;
+            --text-color: #fff;
+            --font-arcade: "Courier New", Courier, monospace;
+        }
+        /* Hace que padding y borde no rompan el ancho de los elementos */
+        * { box-sizing: border-box; }
+
+          /* Construcción de la caja-nivel*/
+        body {
+            background: radial-gradient(circle at top, rgba(36, 36, 255, 0.18), transparent 35%), linear-gradient(180deg, #050608, #000);
+            color: var(--text-color); font-family: var(--font-arcade); margin: 0;
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            overflow: hidden; touch-action: none;
+        }
+        #game-container {
+            position: relative; width: min(96vw, 520px); display: flex; flex-direction: column; align-items: center;
+            gap: 12px; padding: 16px; border: 2px solid rgba(36, 36, 255, 0.5); border-radius: 18px;
+            background: rgba(13, 16, 32, 0.92); box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+        }
+        /* El HUD superior con score, pellets y vidas */
+        #hud { width: 100%; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; font-size: 14px; text-transform: uppercase; }
+        .hud-item { padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 10px; background: rgba(255, 255, 255, 0.04); text-align: center; }
+        .hud-item strong { display: block; margin-top: 4px; font-size: 18px; }
+        /* El canvas es la cancha real donde se dibuja todo el juego */
+        canvas { width: 100%; height: auto; border: 4px solid var(--maze-color); border-radius: 8px; box-shadow: 0 0 20px rgba(36, 36, 255, 0.4); background: #000; }
+        /* Botones touch para mobile */
+        #controls { display: grid; grid-template-areas: ". up ." "left down right"; gap: 12px; justify-items: center; width: 100%; max-width: 240px; }
+        .btn {
+            width: 64px; height: 64px; background: rgba(255, 255, 255, 0.08); border: 2px solid rgba(255, 255, 255, 0.18);
+            color: white; display: flex; align-items: center; justify-content: center; font-size: 28px; border-radius: 14px;
+            user-select: none; cursor: pointer; transition: transform 0.1s, background 0.15s;
+        }
+        .btn:active { transform: scale(0.96); background: rgba(255, 255, 255, 0.18); }
+        #up { grid-area: up; } #left { grid-area: left; } #down { grid-area: down; } #right { grid-area: right; }
+        #overlay {
+            position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+            gap: 14px; padding: 24px; background: rgba(0, 0, 0, 0.82); border-radius: 18px; z-index: 10; text-align: center;
+        }
+        #overlay h1 { margin: 0; font-size: clamp(28px, 5vw, 42px); }
+        #restart-btn {
+            padding: 14px 26px; background: var(--maze-color); border: none; color: white;
+            font-family: var(--font-arcade); font-size: 18px; border-radius: 8px; cursor: pointer; text-transform: uppercase;
+        }
+        /* En escritorio se ocultan los botones touch y se usa teclado */
+        @media (min-width: 900px) { #controls { display: none; } }
+    </style>
+</head>
+<body>
+    <!-- La UI visible del juego: HUD, canvas, overlay y controles -->
+    <div id="game-container">
+        <div id="hud">
+            <div class="hud-item">Score<strong id="score">0</strong></div>
+            <div class="hud-item">Pellets<strong id="pellets">0</strong></div>
+            <div class="hud-item">Vidas<strong id="lives">3</strong></div>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+        <div id="overlay">
+            <h1 id="status-text">GAME OVER</h1>
+            <button id="restart-btn" type="button">REINICIAR</button>
+        </div>
+        <div id="controls">
+            <button id="up" class="btn" type="button">?</button>
+            <button id="left" class="btn" type="button">?</button>
+            <button id="down" class="btn" type="button">?</button>
+            <button id="right" class="btn" type="button">?</button>
+        </div>
+    </div>
+
+    <script>
+          /* Variables definidas, Chase es el modo persecución, Scatter el modo dispersión (fantasmas se dispersan por el mapa), Angry_Speed es para emular
+          el comportamiento del fantasma rojo original que cuando quedan pocos pellets, aumenta la velocidad.
+          Scared, es cuando te comes la super pellet */
+        const TILE_SIZE = 20;
+        const GRID_WIDTH = 19;
+        const GRID_HEIGHT = 21;
+        const PLAYER_SPEED = 7;
+        const GHOST_SPEED = 6;
+        const BLINKY_ANGRY_SPEED = 7.6;
+        const SCARED_GHOST_SPEED = 3.8;
+        const BLINKY_ANGRY_THRESHOLD = 20;
+        const SCATTER_DURATION = 7;
+        const CHASE_DURATION = 20;
+        const STARTING_LIVES = 3;
+        const POWER_MODE_DURATION = 8; // Duraci�n razonable
+      /* Lo que está más abajo es el mapa inicial, al no haber construido un editor de niveles, este se ajusta de manera manual 
+            - 1: pared
+            - 0: pellet normal
+            - 2: pasillo vacío / zona transitable sin pellet
+            - 3: spawn inicial de Pac-Man
+            - 4: super pellet */
+        const INITIAL_MAP = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,4,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,4,1],
+            [1,0,1,1,0,1,1,1,0,1,0,1,1,1,0,1,1,0,1],
+            [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+            [1,0,1,1,0,1,0,1,1,1,1,1,0,1,0,1,1,0,1],
+            [1,0,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,0,1],
+            [1,1,1,1,0,1,1,1,2,1,2,1,1,1,0,1,1,1,1],
+            [2,2,2,1,0,1,2,2,2,2,2,2,2,1,0,1,2,2,2],
+            [1,1,1,1,0,1,2,1,1,2,1,1,2,1,0,1,1,1,1],
+            [2,2,2,2,0,2,2,1,2,2,2,1,2,2,0,2,2,2,2],
+            [1,1,1,1,0,1,2,1,1,1,1,1,2,1,0,1,1,1,1],
+            [2,2,2,1,0,1,2,2,2,2,2,2,2,1,0,1,2,2,2],
+            [1,1,1,1,0,1,2,1,1,1,1,1,2,1,0,1,1,1,1],
+            [1,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1],
+            [1,0,1,1,0,1,1,1,0,1,0,1,1,1,0,1,1,0,1],
+            [1,0,0,1,0,0,0,0,0,3,0,0,0,0,0,1,0,0,1],
+            [1,1,0,1,0,1,0,1,1,1,1,1,0,1,0,1,0,1,1],
+            [1,0,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,0,1],
+            [1,0,1,1,1,1,1,1,0,1,0,1,1,1,1,1,1,0,1],
+            [1,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ];
+   /* Variables de dirección: indican hacia dónde se mueve una entidad y el ángulo de la boca de Pac-Man */
+        const DIRECTIONS = {
+            UP: { x: 0, y: -1, angle: 1.5 * Math.PI },
+            DOWN: { x: 0, y: 1, angle: 0.5 * Math.PI },
+            LEFT: { x: -1, y: 0, angle: Math.PI },
+            RIGHT: { x: 1, y: 0, angle: 0 }
+        };
+   /* El control: guarda la última dirección pedida por teclado o por botones touch */
+        class InputController {
+            constructor() { this.currentDirection = null; this.bound = false; }
+            bind() {
+                if (this.bound) return;
+                /* Listener del teclado para desktop */
+                window.addEventListener("keydown", (e) => {
+                    if (e.key === "ArrowUp") this.currentDirection = DIRECTIONS.UP;
+                    if (e.key === "ArrowDown") this.currentDirection = DIRECTIONS.DOWN;
+                    if (e.key === "ArrowLeft") this.currentDirection = DIRECTIONS.LEFT;
+                    if (e.key === "ArrowRight") this.currentDirection = DIRECTIONS.RIGHT;
+                });
+                /* Botones touch / mouse para mobile o pruebas rápidas */
+                ["up", "down", "left", "right"].forEach(id => {
+                    const btn = document.getElementById(id);
+                    const handler = (e) => { e.preventDefault(); this.currentDirection = DIRECTIONS[id.toUpperCase()]; };
+                    btn.addEventListener("touchstart", handler, { passive: false });
+                    btn.addEventListener("mousedown", handler);
+                });
+                this.bound = true;
+            }
+            consumeDirection() { return this.currentDirection; }
+            clear() { this.currentDirection = null; }
+        }
+        /* Audio sintetizado por codigo con Web Audio API.
+           Se usa para mantener el juego autocontenido y evitar cargar assets externos. */
+        class SoundManager {
+            constructor() {
+                this.audioContext = null;
+                this.masterGain = null;
+                this.enabled = false;
+                this.lastPelletAt = 0;
+            }
+            unlock() {
+                /* Los navegadores modernos bloquean audio hasta la primera interaccion del usuario. */
+                if (!window.AudioContext && !window.webkitAudioContext) return;
+                if (!this.audioContext) {
+                    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+                    this.audioContext = new AudioCtor();
+                    this.masterGain = this.audioContext.createGain();
+                    /* Volumen global bajo para no saturar los beeps cortos del juego. */
+                    this.masterGain.gain.value = 0.08;
+                    this.masterGain.connect(this.audioContext.destination);
+                }
+                if (this.audioContext.state === "suspended") this.audioContext.resume();
+                this.enabled = true;
+            }
+            bindUnlock() {
+                /* Cualquier teclado, click o touch inicial habilita el motor de audio. */
+                const unlock = () => this.unlock();
+                window.addEventListener("keydown", unlock, { passive: true });
+                window.addEventListener("pointerdown", unlock, { passive: true });
+                window.addEventListener("touchstart", unlock, { passive: true });
+            }
+            playTone(frequency, duration, type = "square", volume = 0.3, startAt = 0) {
+                /* Utilidad base: crea un oscilador corto con envolvente simple de ataque y caida. */
+                if (!this.enabled || !this.audioContext || !this.masterGain) return;
+                const now = this.audioContext.currentTime + startAt;
+                const osc = this.audioContext.createOscillator();
+                const gain = this.audioContext.createGain();
+                osc.type = type;
+                osc.frequency.setValueAtTime(frequency, now);
+                gain.gain.setValueAtTime(0.0001, now);
+                gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+                gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                osc.start(now);
+                osc.stop(now + duration + 0.02);
+            }
+            playPellet(kind = "normal") {
+                /* Pac-Man clasico usa un "waka" muy corto y repetitivo.
+                   Aqui se emula con pulsos cuadrados breves y una version mas brillante para energizers. */
+                if (!this.audioContext) return;
+                const nowMs = performance.now();
+                /* Evita que varios pellets casi simultaneos monten demasiados osciladores. */
+                if (nowMs - this.lastPelletAt < 45) return;
+                this.lastPelletAt = nowMs;
+                if (kind === "super") {
+                    this.playTone(622, 0.05, "square", 0.18, 0);
+                    this.playTone(784, 0.07, "square", 0.14, 0.04);
+                } else {
+                    this.playTone(466, 0.04, "square", 0.16, 0);
+                }
+            }
+            playDeath() {
+                /* Secuencia descendente inspirada en la caida dramatica original al perder una vida. */
+                if (!this.audioContext) return;
+                this.playTone(392, 0.12, "sawtooth", 0.18, 0);
+                this.playTone(349, 0.12, "sawtooth", 0.17, 0.08);
+                this.playTone(311, 0.14, "sawtooth", 0.16, 0.16);
+                this.playTone(262, 0.18, "triangle", 0.14, 0.28);
+                this.playTone(196, 0.24, "triangle", 0.12, 0.42);
+            }
+        }
+   /* El laberinto: contiene el estado actual del mapa, pellets restantes y validaciones del grid */
+        class Board {
+            constructor(template) { this.template = template; this.reset(); }
+            reset() {
+                /* Copia el mapa base para no mutarlo directamente entre partidas */
+                this.grid = this.template.map(r => r.slice()); this.pelletsLeft = 0;
+                for (let r = 0; r < GRID_HEIGHT; r++) {
+                    for (let c = 0; c < GRID_WIDTH; c++) {
+                        /* El 3 solo marca el spawn inicial de Pac-Man, luego se vuelve un pasillo normal */
+                        if (this.grid[r][c] === 3) { this.playerStart = { col: c, row: r }; this.grid[r][c] = 2; }
+                        /* Los pellets normales y super pellets cuentan para la victoria */
+                        if (this.grid[r][c] === 0 || this.grid[r][c] === 4) this.pelletsLeft++;
+                    }
+                }
+            }
+            normalizePosition(col, row) {
+                /* Si sale del alto del mapa, directamente no es válido */
+                if (row < 0 || row >= GRID_HEIGHT) return null;
+                if (col < 0 || col >= GRID_WIDTH) {
+                    /* El wrap-around horizontal solo existe en la fila del túnel central */
+                    if (row !== 9) return null;
+                    return { col: col < 0 ? GRID_WIDTH - 1 : 0, row, wrapped: true };
+                }
+                return { col, row, wrapped: false };
+            }
+            isWalkable(col, row, isGhost = false, ghostMode = null) {
+                const norm = this.normalizePosition(col, row);
+                if (!norm) return false;
+                if (this.grid[norm.row][norm.col] === 1) return false;
+                
+                // Restricción : Fantasmas activos no pueden entrar al cajón (puerta en 8, 9)
+                if (isGhost) {
+                    if (norm.row === 8 && norm.col === 9) {
+                        if (!(ghostMode instanceof EatenMode) && !(ghostMode instanceof HouseMode)) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+            wrapEntityPosition(entity) {
+                /* Si una entidad atraviesa el túnel lateral, aparece al otro lado */
+                if (Math.abs(entity.y - (9 * TILE_SIZE + TILE_SIZE/2)) < 2) {
+                    const minX = -entity.radius, maxX = GRID_WIDTH * TILE_SIZE + entity.radius;
+                    if (entity.x < minX) entity.x = maxX; else if (entity.x > maxX) entity.x = minX;
+                }
+            }
+            consumePellet(col, row) {
+                /* Al comer un pellet, se convierte en pasillo vacío y se descuenta del total */
+                if (this.grid[row][col] === 0 || this.grid[row][col] === 4) {
+                    const type = this.grid[row][col] === 4 ? "super" : "normal";
+                    this.grid[row][col] = 2; this.pelletsLeft--; return type;
+                }
+                return null;
+            }
+            draw(ctx) {
+                /* Recorre el grid completo y dibuja muros, pellets normales y super pellets */
+                for (let r = 0; r < GRID_HEIGHT; r++) for (let c = 0; c < GRID_WIDTH; c++) {
+                    const tile = this.grid[r][c], x = c * TILE_SIZE, y = r * TILE_SIZE;
+                    if (tile === 1) { ctx.fillStyle = "#2424ff"; ctx.fillRect(x+2, y+2, TILE_SIZE-4, TILE_SIZE-4); }
+                    else if (tile === 0) { ctx.fillStyle = "#ffb8ae"; ctx.beginPath(); ctx.arc(x+10, y+10, 2.5, 0, 7); ctx.fill(); }
+                    else if (tile === 4) { ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(x+10, y+10, 5.5, 0, 7); ctx.fill(); }
+                }
+            }
+        }
+   /* Esta es la clase base de los objetos Player y Ghost (fantasma), estos son hijos de ella  */
+        class Entity {
+            constructor(x, y, speed) {
+                this.x = x; this.y = y; this.baseSpeed = speed; this.speed = speed;
+                this.dir = DIRECTIONS.RIGHT; this.nextDir = null; this.radius = TILE_SIZE / 2 - 2;
+            }
+            getGridPos() { return { col: Math.floor(this.x / TILE_SIZE), row: Math.floor(this.y / TILE_SIZE) }; }
+            canMove(dir, board) {
+                /* Revisa si la siguiente celda a la que quiere entrar es caminable */
+                const { col, row } = this.getGridPos();
+                return board.isWalkable(col + dir.x, row + dir.y, this instanceof Ghost, this.mode);
+            }
+            update(game, deltaTime) {
+                /* Mueve la entidad según su velocidad y el delta time */
+                const distance = this.speed * TILE_SIZE * deltaTime;
+                const prevX = this.x, prevY = this.y;
+                
+                this.x += this.dir.x * distance; this.y += this.dir.y * distance;
+                game.board.wrapEntityPosition(this);
+
+                const cx = Math.floor(prevX / TILE_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+                const cy = Math.floor(prevY / TILE_SIZE) * TILE_SIZE + TILE_SIZE / 2;
+
+                // Detección matemática del "cruce por el centro" para evitar overshoot
+                const crossedX = this.dir.x !== 0 && ((prevX <= cx && this.x >= cx) || (prevX >= cx && this.x <= cx));
+                const crossedY = this.dir.y !== 0 && ((prevY <= cy && this.y >= cy) || (prevY >= cy && this.y <= cy));
+
+                if (crossedX || crossedY) {
+                    /* Se corrige la posición exacta al centro del tile y luego se delega la lógica específica */
+                    const overshoot = Math.abs(crossedX ? this.x - cx : this.y - cy);
+                    this.x = cx; this.y = cy;
+                    this.onCenterCrossed(game, overshoot);
+                }
+            }
+            onCenterCrossed(game, overshoot) {}
+        }
+   /* Clase player, es el jugador */
+        class Player extends Entity {
+            constructor(x, y) { super(x, y, PLAYER_SPEED); this.mouthOpen = 0; this.mouthDirection = 1; }
+            onCenterCrossed(game, overshoot) {
+                /* Si hay una dirección pendiente válida, gira apenas cruza el centro */
+                if (this.nextDir && this.canMove(this.nextDir, game.board)) {
+                    this.dir = this.nextDir; this.nextDir = null;
+                }
+                /* Luego de centrarlo, reaplica el sobrante del movimiento en la nueva dirección */
+                if (this.canMove(this.dir, game.board)) {
+                    this.x += this.dir.x * overshoot; this.y += this.dir.y * overshoot;
+                }
+            }
+            update(game, deltaTime) {
+                super.update(game, deltaTime);
+                /* Animación simple de apertura y cierre de boca */
+                this.mouthOpen += this.mouthDirection * deltaTime * 2.6;
+                if (this.mouthOpen >= 0.25 || this.mouthOpen <= 0.02) { this.mouthDirection *= -1; this.mouthOpen = Math.max(0.02, Math.min(0.25, this.mouthOpen)); }
+                
+                /* Revisa si la celda actual tiene pellet normal o super pellet */
+                const { col, row } = this.getGridPos();
+                const pellet = game.board.consumePellet(col, row);
+                if (pellet === "normal") {
+                    game.score += 10;
+                    game.sound.playPellet("normal");
+                }
+                else if (pellet === "super") {
+                    game.score += 50;
+                    game.sound.playPellet("super");
+                    game.activatePowerMode();
+                }
+            }
+            draw(ctx) {
+                ctx.fillStyle = "#ffff00"; ctx.beginPath(); ctx.moveTo(this.x, this.y);
+                ctx.arc(this.x, this.y, this.radius + 1, this.dir.angle + this.mouthOpen * Math.PI, this.dir.angle + (2 - this.mouthOpen) * Math.PI); ctx.fill();
+            }
+        }
+   /* Clase fantasma con sus modos Chase, Scatter, Scared, Eaten y House */
+        class GhostMode { constructor(label) { this.label = label; } getTarget(ghost, game) { return ghost.scatterTarget; } getSpeed(ghost) { return ghost.baseSpeed; } }
+        class ChaseMode extends GhostMode { constructor() { super("Chase"); } getTarget(ghost, game) { return ghost.getChaseTarget(game); } }
+        class ScatterMode extends GhostMode { constructor() { super("Scatter"); } }
+        class ScaredMode extends GhostMode { 
+            constructor() { super("Scared"); }
+            getTarget(ghost, game) { return ghost.scatterTarget; } // Huye err�ticamente
+            getSpeed() { return SCARED_GHOST_SPEED; }
+        }
+        class EatenMode extends GhostMode {
+            constructor() { super("Eaten"); }
+            getTarget() { return { col: 9, row: 9 }; } // Centro de la casa
+            getSpeed(ghost) { return ghost.baseSpeed * 2.5; }
+        }
+        class HouseMode extends GhostMode {
+            constructor(delay) { super("House"); this.exitDelay = delay; this.timer = 0; }
+            getTarget() { return { col: 9, row: 7 }; } // Salida
+            getSpeed(ghost) { return ghost.baseSpeed * 0.6; }
+        }
+   /* Clase Ghost (fantasma) en específico: contiene la IA base de todos los fantasmas */
+        class Ghost extends Entity {
+            constructor(x, y, color, scatterTarget) {
+                super(x, y, GHOST_SPEED);
+                this.color = color; this.scatterTarget = scatterTarget;
+            }
+            getChaseTarget(game) { return game.player.getGridPos(); }
+            getHouseExitDirection() {
+                /* Dentro de la casa, todos siguen un recorrido fijo hacia la puerta. */
+                const { col } = this.getGridPos();
+                if (col < 9) return DIRECTIONS.RIGHT;
+                if (col > 9) return DIRECTIONS.LEFT;
+                return DIRECTIONS.UP;
+            }
+            resetToStart(start, exitDelay) {
+                /* Reinicia al fantasma dentro de la casa y le asigna un delay de salida */
+                this.x = start.x; this.y = start.y; this.dir = this.getHouseExitDirection();
+                this.mode = new HouseMode(exitDelay); this.modeTimer = 0; this.speed = this.mode.getSpeed(this);
+            }
+            onCenterCrossed(game, overshoot) {
+                if (this.mode instanceof HouseMode) {
+                    /* La salida de la casa no depende de la IA general para evitar bloqueos en spawn. */
+                    this.dir = this.getHouseExitDirection();
+                    if (this.canMove(this.dir, game.board)) {
+                        this.x += this.dir.x * overshoot; this.y += this.dir.y * overshoot;
+                    }
+                    return;
+                }
+                /* Cada vez que cruza el centro de un tile decide la siguiente dirección */
+                const target = this.mode.getTarget(this, game);
+                const { col, row } = this.getGridPos();
+                const possible = [DIRECTIONS.UP, DIRECTIONS.LEFT, DIRECTIONS.DOWN, DIRECTIONS.RIGHT];
+                const valid = possible.filter(d => game.board.isWalkable(col + d.x, row + d.y, true, this.mode));
+                const forward = valid.filter(d => !(d.x === -this.dir.x && d.y === -this.dir.y));
+                
+                const candidates = forward.length > 0 ? forward : valid;
+                let best = this.dir, minD = Infinity;
+                for (const d of candidates) {
+                    const dist = Math.hypot(col + d.x - target.col, row + d.y - target.row);
+                    // Scared Mode: Escoge el camino que aleje
+                    const actualDist = this.mode instanceof ScaredMode ? -dist : dist;
+                    if (actualDist < minD) { minD = actualDist; best = d; }
+                }
+                this.dir = best;
+                
+                if (this.canMove(this.dir, game.board)) {
+                    this.x += this.dir.x * overshoot; this.y += this.dir.y * overshoot;
+                }
+            }
+            update(game, deltaTime) {
+                /* Primero actualiza su estado y luego se mueve */
+                this.updateMode(game, deltaTime);
+                super.update(game, deltaTime);
+            }
+            updateMode(game, deltaTime) {
+                /* Si fue comido, corre de vuelta a la casa hasta volver a entrar */
+                if (this.mode instanceof EatenMode) {
+                    const { col, row } = this.getGridPos();
+                    if (row === 9 && col >= 8 && col <= 10) { this.mode = new ChaseMode(); this.modeTimer = 0; }
+                    this.speed = this.mode.getSpeed(this); return;
+                }
+
+                /* Si está en la casa, espera o sube hacia la salida según su delay */
+                if (this.mode instanceof HouseMode) {
+                    this.mode.timer += deltaTime;
+                    if (this.mode.timer >= this.mode.exitDelay) {
+                        const { col, row } = this.getGridPos();
+                        if (row <= 7) { this.mode = new ChaseMode(); this.modeTimer = 0; }
+                        else {
+                            this.dir = this.getHouseExitDirection();
+                            this.speed = this.mode.getSpeed(this);
+                            return;
+                        }
+                    } else { this.speed = 0; return; }
+                }
+
+                /* Si Pac-Man está potenciado, todos los fantasmas pasan a scared */
+                if (game.powerModeTimeLeft > 0) {
+                    if (!(this.mode instanceof ScaredMode)) { this.mode = new ScaredMode(); this.dir = { x: -this.dir.x, y: -this.dir.y }; }
+                    this.speed = this.mode.getSpeed(this); return;
+                }
+
+                /* Ciclo normal entre scatter y chase */
+                this.modeTimer += deltaTime;
+                if (this.mode instanceof ScaredMode) { this.mode = new ChaseMode(); this.modeTimer = 0; }
+                else if (this.mode instanceof ScatterMode && this.modeTimer >= SCATTER_DURATION) { this.mode = new ChaseMode(); this.modeTimer = 0; }
+                else if (this.mode instanceof ChaseMode && this.modeTimer >= CHASE_DURATION) { this.mode = new ScatterMode(); this.modeTimer = 0; }
+                this.speed = this.mode.getSpeed(this);
+            }
+            draw(ctx) {
+                /* En modo eaten solo se dibujan los ojos para simular al fantasma regresando */
+                if (this.mode instanceof EatenMode) { this.drawEyes(ctx); return; }
+                
+                const scared = this.mode instanceof ScaredMode;
+                ctx.fillStyle = scared ? "#2d6bff" : this.color; ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius + 1, Math.PI, 0);
+                ctx.lineTo(this.x + this.radius + 1, this.y + this.radius + 1);
+                ctx.lineTo(this.x - this.radius - 1, this.y + this.radius + 1); ctx.fill();
+
+                if (scared) {
+                    /* Sprite simple del fantasma asustado */
+                    ctx.strokeStyle = "white"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(this.x-4, this.y-2, 3, 0, Math.PI); ctx.arc(this.x+4, this.y-2, 3, 0, Math.PI); ctx.stroke();
+                    ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(this.x-4, this.y+4, 1.2, 0, 7); ctx.arc(this.x, this.y+5, 1.2, 0, 7); ctx.arc(this.x+4, this.y+4, 1.2, 0, 7); ctx.fill();
+                    return;
+                }
+                this.drawEyes(ctx);
+            }
+            drawEyes(ctx) {
+                /* Ojos del fantasma normal o del fantasma comido */
+                ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(this.x-4, this.y-2, 3, 0, 7); ctx.arc(this.x+4, this.y-2, 3, 0, 7); ctx.fill();
+                ctx.fillStyle = "black"; ctx.beginPath(); ctx.arc(this.x-4 + this.dir.x*2, this.y-2 + this.dir.y*2, 1.5, 0, 7); ctx.arc(this.x+4 + this.dir.x*2, this.y-2 + this.dir.y*2, 1.5, 0, 7); ctx.fill();
+            }
+        }
+   /* Clases de los cuatro fantasmas, tienen los mismos nombres que los originales.  */
+
+        class Blinky extends Ghost { constructor(x, y) { super(x, y, "red", { col: 17, row: 1 }); } getChaseTarget(game) { return game.player.getGridPos(); } }
+        class Pinky extends Ghost { constructor(x, y) { super(x, y, "#ffb8ff", { col: 1, row: 1 }); } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir; return { col: p.col + d.x*4 - (d===DIRECTIONS.UP?4:0), row: p.row + d.y*4 }; } }
+        class Inky extends Ghost { constructor(x, y, b) { super(x, y, "#00ffff", { col: 17, row: 19 }); this.b = b; } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir, pt = {col: p.col + d.x*2, row: p.row + d.y*2}, bp = this.b.getGridPos(); return { col: bp.col + (pt.col - bp.col)*2, row: bp.row + (pt.row - bp.row)*2 }; } }
+        class Clyde extends Ghost { constructor(x, y) { super(x, y, "#ffb852", { col: 1, row: 19 }); } getChaseTarget(game) { const p = game.player.getGridPos(), c = this.getGridPos(); return Math.hypot(p.col-c.col, p.row-c.row) > 8 ? p : this.scatterTarget; } }
+   /* Clase Game engine, controla el loop del juego y el estado global de la partida */
+
+        class GameEngine {
+            constructor() {
+                /* Obtiene el canvas, crea el tablero y prepara input + reinicio */
+                this.canvas = document.getElementById("gameCanvas"); this.ctx = this.canvas.getContext("2d");
+                this.canvas.width = GRID_WIDTH * TILE_SIZE; this.canvas.height = GRID_HEIGHT * TILE_SIZE;
+                this.board = new Board(INITIAL_MAP); this.input = new InputController(); this.sound = new SoundManager();
+                this.lastTime = 0; this.init(); this.input.bind(); this.sound.bindUnlock(); document.getElementById("restart-btn").onclick = () => this.init();
+            }
+            init() {
+                /* Reinicia score, vidas, power mode, tablero y entidades */
+                this.board.reset(); this.score = 0; this.lives = STARTING_LIVES; this.powerModeTimeLeft = 0; this.gameOver = false;
+                document.getElementById("overlay").style.display = "none"; this.createEntities(); this.syncHud();
+            }
+            createEntities() {
+                /* Define spawns y construye jugador + fantasmas */
+                this.playerStart = { x: 9 * 20 + 10, y: 15 * 20 + 10 };
+                this.ghostStarts = [ {x: 9*20+10, y: 7*20+10}, {x: 9*20+10, y: 9*20+10}, {x: 8*20+10, y: 9*20+10}, {x: 10*20+10, y: 9*20+10} ];
+                this.player = new Player(this.playerStart.x, this.playerStart.y);
+                const b = new Blinky(0,0), p = new Pinky(0,0), i = new Inky(0,0,b), c = new Clyde(0,0);
+                this.ghosts = [b, p, i, c]; this.entities = [this.player, ...this.ghosts];
+                this.resetRoundPositions();
+            }
+            resetRoundPositions() {
+                /* Reubica al jugador y a los fantasmas al perder una vida o al arrancar */
+                this.player.x = this.playerStart.x; this.player.y = this.playerStart.y; this.player.dir = DIRECTIONS.RIGHT; this.player.nextDir = null;
+                const delays = [0, 1.5, 4, 7]; // Tiempos de salida
+                this.ghosts.forEach((g, i) => g.resetToStart(this.ghostStarts[i], delays[i]));
+                this.powerModeTimeLeft = 0; this.input.clear();
+            }
+            /* Mantiene la UI sincronizada con el estado real del juego */
+            syncHud() { document.getElementById("score").innerText = this.score; document.getElementById("pellets").innerText = this.board.pelletsLeft; document.getElementById("lives").innerText = this.lives; }
+            update(dt) {
+                if (this.gameOver) return;
+                /* Cuenta regresiva del power mode */
+                if (this.powerModeTimeLeft > 0) this.powerModeTimeLeft = Math.max(0, this.powerModeTimeLeft - dt);
+                /* Pasa la última dirección pedida al jugador */
+                this.player.nextDir = this.input.consumeDirection();
+                /* Actualiza todas las entidades vivas del tablero */
+                this.entities.forEach(e => e.update(this, dt));
+
+                /* Revisa colisiones jugador vs fantasmas */
+                for (let g of this.ghosts) {
+                    if (Math.hypot(this.player.x - g.x, this.player.y - g.y) <= 12) {
+                        if (g.mode instanceof EatenMode) continue;
+                        /* Si el fantasma está scared, Pac-Man se lo come */
+                        if (g.mode instanceof ScaredMode) { this.score += 200; g.mode = new EatenMode(); }
+                        else {
+                            /* Si no está scared, Pac-Man pierde una vida */
+                            this.lives--;
+                            this.sound.playDeath();
+                            if (this.lives === 0) { this.gameOver = true; document.getElementById("status-text").innerText = "GAME OVER"; document.getElementById("status-text").style.color = "#ff0000"; document.getElementById("overlay").style.display = "flex"; }
+                            else { this.resetRoundPositions(); }
+                            break;
+                        }
+                    }
+                }
+                if (this.board.pelletsLeft === 0) { this.gameOver = true; document.getElementById("status-text").innerText = "�VICTORIA!"; document.getElementById("status-text").style.color = "#00ff00"; document.getElementById("overlay").style.display = "flex"; }
+                this.syncHud();
+            }
+            /* Activa la invencibilidad temporal tras comer un super pellet */
+            activatePowerMode() { this.powerModeTimeLeft = POWER_MODE_DURATION; }
+            /* Dibuja fondo, tablero y entidades en ese orden */
+            draw() { this.ctx.fillStyle = "black"; this.ctx.fillRect(0,0,this.canvas.width,this.canvas.height); this.board.draw(this.ctx); this.entities.forEach(e => e.draw(this.ctx)); }
+            /* Loop principal del juego con delta time limitado para evitar saltos bruscos */
+            run(ts) { const dt = Math.min((ts - this.lastTime) / 1000 || 0, 0.05); this.lastTime = ts; this.update(dt); this.draw(); requestAnimationFrame(t => this.run(t)); }
+        }
+        /* Se crea una instancia del juego y se arranca el loop */
+        const game = new GameEngine(); requestAnimationFrame(t => game.run(t));
+    </script>
+</body>
+</html>
