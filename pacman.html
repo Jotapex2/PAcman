@@ -39,7 +39,7 @@
         .hud-item strong { display: block; margin-top: 4px; font-size: 18px; }
         /* El canvas es la cancha real donde se dibuja todo el juego */
         canvas { width: 100%; height: auto; border: 4px solid var(--maze-color); border-radius: 8px; box-shadow: 0 0 20px rgba(36, 36, 255, 0.4); background: #000; }
-        /* D-pad touch pensado para pulgares */
+        /* D-pad touch pensado para pulgares-celular */
         #controls {
             position: relative;
             display: grid;
@@ -134,8 +134,8 @@
         const GRID_WIDTH = 19;
         const GRID_HEIGHT = 21;
         const PLAYER_SPEED = 7;
-        const GHOST_SPEED = 6;
-        const BLINKY_ANGRY_SPEED = 7.6;
+        const GHOST_SPEED = 4.5;
+        const BLINKY_ANGRY_SPEED = 6.6;
         const SCARED_GHOST_SPEED = 3.8;
         const BLINKY_ANGRY_THRESHOLD = 20;
         const SCATTER_DURATION = 7;
@@ -337,7 +337,7 @@
                 this.playTone(freq, 0.16, "sawtooth", 0.06, 0);
             }
             updatePowerSound(isActive, deltaTime) {
-                /* Loop corto de dos notas para ScaredMode, inspirado en el frightened theme clásico */
+                /* Loop corto de dos notas para ScaredMode, inspirado en la música original */
                 if (!isActive || !this.enabled || !this.audioContext) {
                     this.powerSoundTimer = 0;
                     this.powerSoundStep = 0;
@@ -420,7 +420,7 @@
                 }
             }
         }
-   /* Esta es la clase base de los objetos Player y Ghost (fantasma), estos son hijos de ella  */
+   /* Esta es la clase entity, base de los objetos Player y Ghost (fantasma), estos son hijos de ella  */
         class Entity {
             constructor(x, y, speed) {
                 this.x = x; this.y = y; this.baseSpeed = speed; this.speed = speed;
@@ -525,8 +525,31 @@
                 super(x, y, GHOST_SPEED);
                 this.color = color; this.scatterTarget = scatterTarget;
                 this.ignorePowerModeUntilExit = false;
+                this.separationWeight = 1;
             }
             getChaseTarget(game) { return game.player.getGridPos(); }
+            getSteeringScore(nextCol, nextRow, target) {
+                return Math.hypot(nextCol - target.col, nextRow - target.row);
+            }
+            getSeparationPenalty(game, nextCol, nextRow) {
+                let penalty = 0;
+                for (const other of game.ghosts) {
+                    if (other === this) continue;
+                    if (other.mode instanceof EatenMode || other.mode instanceof HouseMode) continue;
+
+                    const otherPos = other.getGridPos();
+                    const distToOther = Math.hypot(nextCol - otherPos.col, nextRow - otherPos.row);
+                    if (distToOther === 0) penalty += 8;
+                    else if (distToOther < 1.5) penalty += (1.5 - distToOther) * 4;
+
+                    const projectedCol = otherPos.col + other.dir.x;
+                    const projectedRow = otherPos.row + other.dir.y;
+                    const distToProjected = Math.hypot(nextCol - projectedCol, nextRow - projectedRow);
+                    if (distToProjected === 0) penalty += 5;
+                    else if (distToProjected < 1.25) penalty += (1.25 - distToProjected) * 3;
+                }
+                return penalty * this.separationWeight;
+            }
             isInsideHouse() {
                 const { col, row } = this.getGridPos();
                 return row === GHOST_HOUSE.innerRow && col >= GHOST_HOUSE.leftCol && col <= GHOST_HOUSE.rightCol;
@@ -534,7 +557,7 @@
             continueHouseExit(game, overshoot) {
                 this.dir = this.getHouseExitDirection();
                 if (this.dir === DIRECTIONS.UP && this.getGridPos().col === GHOST_HOUSE.centerCol) {
-                    /* La puerta solo bloquea a la IA normal; la rutina de salida puede atravesarla. */
+                    /* La puerta solo bloquea a la IA normal; puede atravesarla solo con la rutina de salida. */
                     this.y += this.dir.y * overshoot;
                     return;
                 }
@@ -543,7 +566,7 @@
                 }
             }
             getHouseExitDirection() {
-                /* Dentro de la casa, todos siguen un recorrido fijo hacia la puerta. */
+                /* Dentro de la casa, todos siguen un recorrido fijo hacia la puerta, esto es para que no se queden pegado dentro de la casa. */
                 const { col } = this.getGridPos();
                 if (col < GHOST_HOUSE.centerCol) return DIRECTIONS.RIGHT;
                 if (col > GHOST_HOUSE.centerCol) return DIRECTIONS.LEFT;
@@ -574,12 +597,21 @@
                 const forward = valid.filter(d => !(d.x === -this.dir.x && d.y === -this.dir.y));
                 
                 const candidates = forward.length > 0 ? forward : valid;
-                let best = this.dir, minD = Infinity;
+                let best = this.dir, bestScore = Infinity;
                 for (const d of candidates) {
-                    const dist = Math.hypot(col + d.x - target.col, row + d.y - target.row);
-                    // Scared Mode: Escoge el camino que lo aleje del pacman, esto es cuando se come la "superpastilla"
-                    const actualDist = this.mode instanceof ScaredMode ? -dist : dist;
-                    if (actualDist < minD) { minD = actualDist; best = d; }
+                    const nextCol = col + d.x;
+                    const nextRow = row + d.y;
+                    let score = this.getSteeringScore(nextCol, nextRow, target);
+
+                    if (!(this.mode instanceof ScaredMode)) {
+                        score += this.getSeparationPenalty(game, nextCol, nextRow);
+                    }
+                    else {
+                        // Scared Mode: Escoge el camino que lo aleje del pacman, esto es cuando se come la "superpastilla"
+                        score = -score;
+                    }
+
+                    if (score < bestScore) { bestScore = score; best = d; }
                 }
                 this.dir = best;
                 
@@ -639,7 +671,7 @@
                 this.speed = this.mode.getSpeed(this);
             }
             draw(ctx, game) {
-                /* En modo eaten solo se dibujan los ojos para simular al fantasma regresando, esto mediante canvas */
+                /* En modo eaten (cuando pacman se come al fantasma) solo se dibujan los ojos para simular al fantasma regresando, esto mediante canvas */
                 if (this.mode instanceof EatenMode) { this.drawEyes(ctx); return; }
                 
                 const scared = this.mode instanceof ScaredMode;
@@ -686,9 +718,38 @@
                 if (isAngry) game.isAngry = true;
                 super.updateMode(game, deltaTime);
             }
-        }        class Pinky extends Ghost { constructor(x, y) { super(x, y, "#ffb8ff", { col: 1, row: 1 }); } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir; return { col: p.col + d.x*4 - (d===DIRECTIONS.UP?4:0), row: p.row + d.y*4 }; } }
-        class Inky extends Ghost { constructor(x, y, b) { super(x, y, "#00ffff", { col: 17, row: 19 }); this.b = b; } getChaseTarget(game) { const p = game.player.getGridPos(), d = game.player.dir, pt = {col: p.col + d.x*2, row: p.row + d.y*2}, bp = this.b.getGridPos(); return { col: bp.col + (pt.col - bp.col)*2, row: bp.row + (pt.row - bp.row)*2 }; } }
-        class Clyde extends Ghost { constructor(x, y) { super(x, y, "#ffb852", { col: 1, row: 19 }); } getChaseTarget(game) { const p = game.player.getGridPos(), c = this.getGridPos(); return Math.hypot(p.col-c.col, p.row-c.row) > 8 ? p : this.scatterTarget; } }
+        }
+        class Pinky extends Ghost {
+            constructor(x, y) {
+                super(x, y, "#ffb8ff", { col: 1, row: 1 });
+                this.separationWeight = 1.35;
+            }
+            getChaseTarget(game) {
+                const p = game.player.getGridPos(), d = game.player.dir;
+                return { col: p.col + d.x*4 - (d===DIRECTIONS.UP?4:0), row: p.row + d.y*4 };
+            }
+        }
+        class Inky extends Ghost {
+            constructor(x, y, b) {
+                super(x, y, "#00ffff", { col: 17, row: 19 });
+                this.b = b;
+                this.separationWeight = 1.2;
+            }
+            getChaseTarget(game) {
+                const p = game.player.getGridPos(), d = game.player.dir, pt = {col: p.col + d.x*2, row: p.row + d.y*2}, bp = this.b.getGridPos();
+                return { col: bp.col + (pt.col - bp.col)*2, row: bp.row + (pt.row - bp.row)*2 };
+            }
+        }
+        class Clyde extends Ghost {
+            constructor(x, y) {
+                super(x, y, "#ffb852", { col: 1, row: 19 });
+                this.separationWeight = 1.6;
+            }
+            getChaseTarget(game) {
+                const p = game.player.getGridPos(), c = this.getGridPos();
+                return Math.hypot(p.col-c.col, p.row-c.row) > 8 ? p : this.scatterTarget;
+            }
+        }
    /* Clase Game engine, controla el loop del juego y el estado global de la partida */
 
         class GameEngine {
